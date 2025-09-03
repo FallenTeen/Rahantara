@@ -53,7 +53,7 @@ jobs:
     - name: Prepare deployment structure
       run: |
         mkdir -p deployment/rahantara
-        mkdir -p deployment/public_html/rahantara.id
+        mkdir -p deployment/public_html
         
         # Copy Laravel app (excluding public folder)
         rsync -av --progress ./ deployment/rahantara/ \
@@ -64,19 +64,19 @@ jobs:
           --exclude=.github \
           --exclude=deployment
           
-        # Copy public folder contents INCLUDING build folder
-        cp -r public/* deployment/public_html/rahantara.id/
+        # Copy public folder contents directly to public_html
+        cp -r public/* deployment/public_html/
         
         # Ensure build folder is copied (jika ada)
         if [ -d "public/build" ]; then
-          cp -r public/build deployment/public_html/rahantara.id/
+          cp -r public/build deployment/public_html/
           echo "Build folder copied successfully"
         else
           echo "Warning: Build folder not found"
         fi
         
-        # Create custom index.php
-        cat > deployment/public_html/rahantara.id/index.php << 'EOF'
+        # Create custom index.php for root domain
+        cat > deployment/public_html/index.php << 'EOF'
         <?php
         
         use Illuminate\Contracts\Http\Kernel;
@@ -84,9 +84,9 @@ jobs:
         
         define('LARAVEL_START', microtime(true));
         
-        require __DIR__.'/../../rahantara/vendor/autoload.php';
+        require __DIR__.'/../rahantara/vendor/autoload.php';
         
-        $app = require_once __DIR__.'/../../rahantara/bootstrap/app.php';
+        $app = require_once __DIR__.'/../rahantara/bootstrap/app.php';
         
         $kernel = $app->make(Kernel::class);
         
@@ -97,8 +97,8 @@ jobs:
         $kernel->terminate($request, $response);
         EOF
         
-        # Create .htaccess
-        cat > deployment/public_html/rahantara.id/.htaccess << 'EOF'
+        # Create .htaccess for root domain
+        cat > deployment/public_html/.htaccess << 'EOF'
         <IfModule mod_rewrite.c>
             <IfModule mod_negotiation.c>
                 Options -MultiViews -Indexes
@@ -136,30 +136,30 @@ jobs:
           **/.github/**
           **/deployment/**
           
-    - name: Deploy Public Assets (Including Build Folder)
+    - name: Deploy Public Assets to Root Domain
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
         server: ${{ secrets.PUBLIC_FTP_SERVER }}
         username: ${{ secrets.PUBLIC_FTP_USERNAME }}
         password: ${{ secrets.PUBLIC_FTP_PASSWORD }}
         port: ${{ secrets.PUBLIC_FTP_PORT }}
-        local-dir: ./deployment/public_html/rahantara.id/
-        server-dir: /public_html/rahantara.id/
+        local-dir: ./deployment/public_html/
+        server-dir: /public_html/
         
     - name: Create symlink script
       run: |
         cat > symlink-setup.sh << 'EOF'
         #!/bin/bash
         
-        # Create storage symlink in public_html
-        cd /home/rahe9358/public_html/rahantara.id
+        # Create storage symlink in public_html (root domain)
+        cd /home/rahe9358/public_html
         if [ -L "storage" ]; then
             rm storage
         fi
         if [ -d "storage" ]; then
             rm -rf storage
         fi
-        ln -sf ../../rahantara/storage/app/public storage
+        ln -sf ../rahantara/storage/app/public storage
         
         # Create storage symlink in Laravel app
         cd /home/rahe9358/rahantara
@@ -188,15 +188,20 @@ jobs:
         fi
         
         echo "Symlinks created successfully"
-        echo "Build assets should be in: /home/rahe9358/public_html/rahantara.id/build/"
+        echo "Build assets should be in: /home/rahe9358/public_html/build/"
         
         # Check if build folder exists
-        if [ -d "/home/rahe9358/public_html/rahantara.id/build" ]; then
-            echo "✓ Build folder found"
-            ls -la /home/rahe9358/public_html/rahantara.id/build/
+        if [ -d "/home/rahe9358/public_html/build" ]; then
+            echo "✓ Build folder found in root domain"
+            ls -la /home/rahe9358/public_html/build/
         else
-            echo "✗ Build folder NOT found"
+            echo "✗ Build folder NOT found in root domain"
         fi
+        
+        echo "Structure:"
+        echo "/home/rahe9358/rahantara/ - Laravel app"
+        echo "/home/rahe9358/public_html/ - Public files (ROOT DOMAIN)"
+        echo "/home/rahe9358/public_html/storage -> ../rahantara/storage/app/public"
         EOF
         
     - name: Deploy symlink script
@@ -227,4 +232,5 @@ jobs:
       run: |
         echo "Rahantara auto-deployment completed!"
         echo "Deployed at: $(date)"
+        echo "Website accessible at ROOT DOMAIN"
         echo "All symlinks have been created automatically"
