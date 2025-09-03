@@ -55,6 +55,7 @@ jobs:
         mkdir -p deployment/rahantara
         mkdir -p deployment/public_html/rahantara.id
         
+        # Copy Laravel app (excluding public folder)
         rsync -av --progress ./ deployment/rahantara/ \
           --exclude=public \
           --exclude=.git \
@@ -63,8 +64,18 @@ jobs:
           --exclude=.github \
           --exclude=deployment
           
+        # Copy public folder contents INCLUDING build folder
         cp -r public/* deployment/public_html/rahantara.id/
         
+        # Ensure build folder is copied (jika ada)
+        if [ -d "public/build" ]; then
+          cp -r public/build deployment/public_html/rahantara.id/
+          echo "Build folder copied successfully"
+        else
+          echo "Warning: Build folder not found"
+        fi
+        
+        # Create custom index.php
         cat > deployment/public_html/rahantara.id/index.php << 'EOF'
         <?php
         
@@ -86,6 +97,7 @@ jobs:
         $kernel->terminate($request, $response);
         EOF
         
+        # Create .htaccess
         cat > deployment/public_html/rahantara.id/.htaccess << 'EOF'
         <IfModule mod_rewrite.c>
             <IfModule mod_negotiation.c>
@@ -124,7 +136,7 @@ jobs:
           **/.github/**
           **/deployment/**
           
-    - name: Deploy Public Assets
+    - name: Deploy Public Assets (Including Build Folder)
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
         server: ${{ secrets.PUBLIC_FTP_SERVER }}
@@ -138,6 +150,8 @@ jobs:
       run: |
         cat > symlink-setup.sh << 'EOF'
         #!/bin/bash
+        
+        # Create storage symlink in public_html
         cd /home/rahe9358/public_html/rahantara.id
         if [ -L "storage" ]; then
             rm storage
@@ -147,6 +161,7 @@ jobs:
         fi
         ln -sf ../../rahantara/storage/app/public storage
         
+        # Create storage symlink in Laravel app
         cd /home/rahe9358/rahantara
         if [ ! -L "public/storage" ]; then
             if [ -d "public/storage" ]; then
@@ -155,22 +170,33 @@ jobs:
             ln -sf ../storage/app/public public/storage
         fi
         
+        # Set proper permissions
         chmod -R 775 storage/
         chmod -R 775 bootstrap/cache/
         
+        # Clear and cache Laravel configurations
         if [ -f ".env" ]; then
             php artisan config:clear
             php artisan cache:clear
+            php artisan route:clear
+            php artisan view:clear
+            
+            # Only cache in production
             php artisan config:cache
             php artisan route:cache
             php artisan view:cache
         fi
         
         echo "Symlinks created successfully"
-        echo "Structure:"
-        echo "/home/rahe9358/rahantara/ - Laravel app"
-        echo "/home/rahe9358/public_html/ - Public files"
-        echo "/home/rahe9358/public_html/storage -> ../rahantara/storage/app/public"
+        echo "Build assets should be in: /home/rahe9358/public_html/rahantara.id/build/"
+        
+        # Check if build folder exists
+        if [ -d "/home/rahe9358/public_html/rahantara.id/build" ]; then
+            echo "✓ Build folder found"
+            ls -la /home/rahe9358/public_html/rahantara.id/build/
+        else
+            echo "✗ Build folder NOT found"
+        fi
         EOF
         
     - name: Deploy symlink script
