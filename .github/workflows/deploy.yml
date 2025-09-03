@@ -1,8 +1,8 @@
-name: Deploy to cPanel
+name: Deploy Laravel to cPanel via FTP
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -10,22 +10,33 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Get latest code
       uses: actions/checkout@v4
 
     - name: Setup PHP
       uses: shivammathur/setup-php@v2
       with:
-        php-version: '8.2'
+        php-version: '8.3'
         extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, dom, filter, gd, iconv, json, mbstring, pdo
 
+    - name: Get Composer Cache Directory
+      id: composer-cache
+      run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+    - name: Cache Composer dependencies
+      uses: actions/cache@v3
+      with:
+        path: ${{ steps.composer-cache.outputs.dir }}
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
+
     - name: Install Composer dependencies
-      run: composer install --no-dev --optimize-autoloader
+      run: composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
 
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '22'
         cache: 'npm'
 
     - name: Install NPM dependencies
@@ -34,69 +45,39 @@ jobs:
     - name: Build assets
       run: npm run build
 
-    - name: Create deployment package
+    - name: Create deployment info
       run: |
-        mkdir deployment-package
-        rsync -av --exclude='node_modules' \
-                  --exclude='.git' \
-                  --exclude='.github' \
-                  --exclude='tests' \
-                  --exclude='deployment-package' \
-                  ./ deployment-package/
+        echo "Deployment started at: $(date)" > deployment-info.txt
+        echo "Commit: ${{ github.sha }}" >> deployment-info.txt
+        echo "Branch: ${{ github.ref_name }}" >> deployment-info.txt
 
-    - name: Deploy to cPanel via SSH
-      uses: appleboy/ssh-action@v1.0.0
+    - name: Deploy to cPanel via FTP
+      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
-        host: ${{ secrets.CPANEL_HOST }}
-        username: ${{ secrets.CPANEL_USERNAME }}
-        key: ${{ secrets.CPANEL_SSH_KEY }}
-        port: ${{ secrets.CPANEL_PORT }}
-        script_stop: true
-        script: |
-          # Create backup
-          if [ -d "${{ secrets.CPANEL_PATH }}/backup" ]; then
-            rm -rf ${{ secrets.CPANEL_PATH }}/backup
-          fi
-          
-          if [ -d "${{ secrets.CPANEL_PATH }}" ]; then
-            cp -r ${{ secrets.CPANEL_PATH }} ${{ secrets.CPANEL_PATH }}/backup
-          fi
-          
-          # Create directory if it doesn't exist
-          mkdir -p ${{ secrets.CPANEL_PATH }}
-          
-          echo "Backup created successfully"
+        server: ${{ secrets.PUBLIC_FTP_SERVER }}
+        username: ${{ secrets.PUBLIC_FTP_USERNAME }}
+        password: ${{ secrets.PUBLIC_FTP_PASSWORD }}
+        port: ${{ secrets.PUBLIC_FTP_PORT }}
+        local-dir: ./
+        server-dir: /public_html/
+        exclude: |
+          **/.git*
+          **/.git*/**
+          **/node_modules/**
+          **/tests/**
+          **/.github/**
+          **/.env.example
+          **/README.md
+          **/package-lock.json
+          **/composer.lock
+          **/.editorconfig
+          **/.gitignore
+          **/.styleci.yml
+          **/phpunit.xml
+          **/vite.config.js
+          **/tailwind.config.js
 
-    - name: Upload files via SCP
-      uses: appleboy/scp-action@v0.1.4
-      with:
-        host: ${{ secrets.CPANEL_HOST }}
-        username: ${{ secrets.CPANEL_USERNAME }}
-        key: ${{ secrets.CPANEL_SSH_KEY }}
-        port: ${{ secrets.CPANEL_PORT }}
-        source: "deployment-package/*"
-        target: ${{ secrets.CPANEL_PATH }}
-        strip_components: 1
-
-    - name: Set permissions and optimize Laravel
-      uses: appleboy/ssh-action@v1.0.0
-      with:
-        host: ${{ secrets.CPANEL_HOST }}
-        username: ${{ secrets.CPANEL_USERNAME }}
-        key: ${{ secrets.CPANEL_SSH_KEY }}
-        port: ${{ secrets.CPANEL_PORT }}
-        script: |
-          cd ${{ secrets.CPANEL_PATH }}
-          
-          # Set proper permissions
-          find . -type f -exec chmod 644 {} \;
-          find . -type d -exec chmod 755 {} \;
-          chmod -R 775 storage
-          chmod -R 775 bootstrap/cache
-          
-          # Laravel optimizations
-          php artisan config:cache
-          php artisan route:cache
-          php artisan view:cache
-          
-          echo "Deployment completed successfully!"
+    - name: ✅ Deployment completed
+      run: |
+        echo "Prosed deploy done!"
+        echo "Deployed at: $(date)"
