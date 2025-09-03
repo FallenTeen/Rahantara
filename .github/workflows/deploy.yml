@@ -1,0 +1,102 @@
+name: Deploy to cPanel
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.2'
+        extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, dom, filter, gd, iconv, json, mbstring, pdo
+
+    - name: Install Composer dependencies
+      run: composer install --no-dev --optimize-autoloader
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install NPM dependencies
+      run: npm ci
+
+    - name: Build assets
+      run: npm run build
+
+    - name: Create deployment package
+      run: |
+        mkdir deployment-package
+        rsync -av --exclude='node_modules' \
+                  --exclude='.git' \
+                  --exclude='.github' \
+                  --exclude='tests' \
+                  --exclude='deployment-package' \
+                  ./ deployment-package/
+
+    - name: Deploy to cPanel via SSH
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.CPANEL_HOST }}
+        username: ${{ secrets.CPANEL_USERNAME }}
+        key: ${{ secrets.CPANEL_SSH_KEY }}
+        port: ${{ secrets.CPANEL_PORT }}
+        script_stop: true
+        script: |
+          # Create backup
+          if [ -d "${{ secrets.CPANEL_PATH }}/backup" ]; then
+            rm -rf ${{ secrets.CPANEL_PATH }}/backup
+          fi
+          
+          if [ -d "${{ secrets.CPANEL_PATH }}" ]; then
+            cp -r ${{ secrets.CPANEL_PATH }} ${{ secrets.CPANEL_PATH }}/backup
+          fi
+          
+          # Create directory if it doesn't exist
+          mkdir -p ${{ secrets.CPANEL_PATH }}
+          
+          echo "Backup created successfully"
+
+    - name: Upload files via SCP
+      uses: appleboy/scp-action@v0.1.4
+      with:
+        host: ${{ secrets.CPANEL_HOST }}
+        username: ${{ secrets.CPANEL_USERNAME }}
+        key: ${{ secrets.CPANEL_SSH_KEY }}
+        port: ${{ secrets.CPANEL_PORT }}
+        source: "deployment-package/*"
+        target: ${{ secrets.CPANEL_PATH }}
+        strip_components: 1
+
+    - name: Set permissions and optimize Laravel
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.CPANEL_HOST }}
+        username: ${{ secrets.CPANEL_USERNAME }}
+        key: ${{ secrets.CPANEL_SSH_KEY }}
+        port: ${{ secrets.CPANEL_PORT }}
+        script: |
+          cd ${{ secrets.CPANEL_PATH }}
+          
+          # Set proper permissions
+          find . -type f -exec chmod 644 {} \;
+          find . -type d -exec chmod 755 {} \;
+          chmod -R 775 storage
+          chmod -R 775 bootstrap/cache
+          
+          # Laravel optimizations
+          php artisan config:cache
+          php artisan route:cache
+          php artisan view:cache
+          
+          echo "Deployment completed successfully!"
