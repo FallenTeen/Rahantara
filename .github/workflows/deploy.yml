@@ -1,4 +1,5 @@
 name: Auto-Deploy Laravel Rahantara to cPanel with Symlinks
+
 on:
   push:
     branches: [ main, master ]
@@ -9,29 +10,31 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Get latest code
+    - name: Checkout latest code
       uses: actions/checkout@v4
       
+    # -----------------------------
+    # PHP & Composer
+    # -----------------------------
     - name: Setup PHP
       uses: shivammathur/setup-php@v2
       with:
         php-version: '8.3'
-        extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, dom, filter, gd, iconv, json, mbstring, pdo
-        
-    - name: Get Composer Cache Directory
-      id: composer-cache
-      run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-      
+        extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, dom, filter, gd, json, pdo
+    
     - name: Cache Composer dependencies
       uses: actions/cache@v3
       with:
-        path: ${{ steps.composer-cache.outputs.dir }}
+        path: vendor
         key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
         restore-keys: ${{ runner.os }}-composer-
         
     - name: Install Composer dependencies
       run: composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
       
+    # -----------------------------
+    # Node & Vite
+    # -----------------------------
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
@@ -41,22 +44,19 @@ jobs:
     - name: Install NPM dependencies
       run: npm ci
       
-    - name: Build assets
+    - name: Build assets with Vite
       run: npm run build
       
-    - name: Create deployment info
-      run: |
-        echo "Deployment started at: $(date)" > deployment-info.txt
-        echo "Commit: ${{ github.sha }}" >> deployment-info.txt
-        echo "Branch: ${{ github.ref_name }}" >> deployment-info.txt
-        
+    # -----------------------------
+    # Deployment packaging
+    # -----------------------------
     - name: Prepare deployment structure
       run: |
         mkdir -p deployment/rahantara
         mkdir -p deployment/public_html
-        
-        # Copy Laravel app (excluding public folder)
-        rsync -av --progress ./ deployment/rahantara/ \
+
+        # Copy Laravel app excluding public
+        rsync -av ./ deployment/rahantara/ \
           --exclude=public \
           --exclude=.git \
           --exclude=node_modules \
@@ -64,61 +64,62 @@ jobs:
           --exclude=.github \
           --exclude=deployment
           
-        # Copy public folder contents directly to public_html
+        # Copy public folder contents
         cp -r public/* deployment/public_html/
         
-        # Ensure build folder is copied (jika ada)
+        # Ensure Vite build is copied
         if [ -d "public/build" ]; then
           cp -r public/build deployment/public_html/
-          echo "Build folder copied successfully"
+          echo "✓ Build folder copied successfully"
         else
-          echo "Warning: Build folder not found"
+          echo "✗ Build folder missing"
+          exit 1
         fi
-        
-        # Create custom index.php for root domain
+
+        # Custom index.php for root domain
         cat > deployment/public_html/index.php << 'EOF'
         <?php
-        
         use Illuminate\Contracts\Http\Kernel;
         use Illuminate\Http\Request;
-        
+
         define('LARAVEL_START', microtime(true));
-        
+
         require __DIR__.'/../rahantara/vendor/autoload.php';
-        
         $app = require_once __DIR__.'/../rahantara/bootstrap/app.php';
-        
         $kernel = $app->make(Kernel::class);
-        
+
         $response = $kernel->handle(
             $request = Request::capture()
         )->send();
-        
+
         $kernel->terminate($request, $response);
         EOF
-        
-        # Create .htaccess for root domain
+
+        # Public .htaccess
         cat > deployment/public_html/.htaccess << 'EOF'
         <IfModule mod_rewrite.c>
             <IfModule mod_negotiation.c>
                 Options -MultiViews -Indexes
             </IfModule>
-        
+
             RewriteEngine On
-        
+
             RewriteCond %{HTTP:Authorization} .
             RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
-        
+
             RewriteCond %{REQUEST_FILENAME} !-d
             RewriteCond %{REQUEST_URI} (.+)/$
             RewriteRule ^ %1 [L,R=301]
-        
+
             RewriteCond %{REQUEST_FILENAME} !-d
             RewriteCond %{REQUEST_FILENAME} !-f
             RewriteRule ^ index.php [L]
         </IfModule>
         EOF
-        
+
+    # -----------------------------
+    # FTP Deploy
+    # -----------------------------
     - name: Deploy Laravel App to /rahantara
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
@@ -128,15 +129,8 @@ jobs:
         port: ${{ secrets.PUBLIC_FTP_PORT }}
         local-dir: ./deployment/rahantara/
         server-dir: /rahantara/
-        exclude: |
-          **/.git*
-          **/.git*/**
-          **/node_modules/**
-          **/tests/**
-          **/.github/**
-          **/deployment/**
-          
-    - name: Deploy Public Assets to Root Domain
+        
+    - name: Deploy Public Assets to /public_html
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
         server: ${{ secrets.PUBLIC_FTP_SERVER }}
@@ -146,77 +140,10 @@ jobs:
         local-dir: ./deployment/public_html/
         server-dir: /public_html/
         
-    - name: Create symlink script
-      run: |
-        cat > symlink-setup.sh << 'EOF'
-        #!/bin/bash
-        
-        # Create storage symlink in public_html (root domain)
-        cd /home/rahe9358/public_html
-        if [ -L "storage" ]; then
-            rm storage
-        fi
-        if [ -d "storage" ]; then
-            rm -rf storage
-        fi
-        ln -sf ../rahantara/storage/app/public storage
-        
-        # Create storage symlink in Laravel app
-        cd /home/rahe9358/rahantara
-        if [ ! -L "public/storage" ]; then
-            if [ -d "public/storage" ]; then
-                rm -rf public/storage
-            fi
-            ln -sf ../storage/app/public public/storage
-        fi
-        
-        # Set proper permissions
-        chmod -R 775 storage/
-        chmod -R 775 bootstrap/cache/
-        
-        # Clear and cache Laravel configurations
-        if [ -f ".env" ]; then
-            php artisan config:clear
-            php artisan cache:clear
-            php artisan route:clear
-            php artisan view:clear
-            
-            # Only cache in production
-            php artisan config:cache
-            php artisan route:cache
-            php artisan view:cache
-        fi
-        
-        echo "Symlinks created successfully"
-        echo "Build assets should be in: /home/rahe9358/public_html/build/"
-        
-        # Check if build folder exists
-        if [ -d "/home/rahe9358/public_html/build" ]; then
-            echo "✓ Build folder found in root domain"
-            ls -la /home/rahe9358/public_html/build/
-        else
-            echo "✗ Build folder NOT found in root domain"
-        fi
-        
-        echo "Structure:"
-        echo "/home/rahe9358/rahantara/ - Laravel app"
-        echo "/home/rahe9358/public_html/ - Public files (ROOT DOMAIN)"
-        echo "/home/rahe9358/public_html/storage -> ../rahantara/storage/app/public"
-        EOF
-        
-    - name: Deploy symlink script
-      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
-      with:
-        server: ${{ secrets.PUBLIC_FTP_SERVER }}
-        username: ${{ secrets.PUBLIC_FTP_USERNAME }}
-        password: ${{ secrets.PUBLIC_FTP_PASSWORD }}
-        port: ${{ secrets.PUBLIC_FTP_PORT }}
-        local-dir: ./
-        server-dir: /
-        include: |
-          symlink-setup.sh
-          
-    - name: Execute symlink setup via SSH
+    # -----------------------------
+    # Post-deploy (Symlinks + Cache Clear + Restart)
+    # -----------------------------
+    - name: Post-deployment setup via SSH
       uses: appleboy/ssh-action@v1.0.3
       with:
         host: ${{ secrets.SSH_HOST }}
@@ -224,13 +151,31 @@ jobs:
         password: ${{ secrets.SSH_PASSWORD }}
         port: ${{ secrets.SSH_PORT || 22 }}
         script: |
-          chmod +x /home/rahe9358/symlink-setup.sh
-          bash /home/rahe9358/symlink-setup.sh
-          rm /home/rahe9358/symlink-setup.sh
-          
+          # Storage symlink in public_html
+          cd /home/rahe9358/public_html
+          rm -rf storage
+          ln -sf ../rahantara/storage/app/public storage
+
+          # Storage symlink in Laravel app
+          cd /home/rahe9358/rahantara
+          rm -rf public/storage
+          ln -sf ../storage/app/public public/storage
+
+          # Fix permissions
+          chmod -R 775 storage/ bootstrap/cache/
+
+          # Clear and cache Laravel configs
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan config:clear
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan cache:clear
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan route:clear
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan view:clear
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan config:cache
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan route:cache
+          /opt/cpanel/ea-php83/root/usr/bin/php artisan view:cache
+
+          # Restart Passenger
+          touch /home/rahe9358/rahantara/tmp/restart.txt
+          echo "✓ Deployment completed and Passenger restarted"
+
     - name: Deployment completed
-      run: |
-        echo "Rahantara auto-deployment completed!"
-        echo "Deployed at: $(date)"
-        echo "Website accessible at ROOT DOMAIN"
-        echo "All symlinks have been created automatically"
+      run: echo "Rahantara auto-deployment finished at $(date)"
