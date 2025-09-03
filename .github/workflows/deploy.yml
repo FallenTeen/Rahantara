@@ -1,5 +1,4 @@
-name: Deploy Laravel to cPanel via FTP
-
+name: Deploy Laravel Rahantara to cPanel via FTP with Symlink
 on:
   push:
     branches: [ main, master ]
@@ -12,73 +11,166 @@ jobs:
     steps:
     - name: Get latest code
       uses: actions/checkout@v4
-
+      
     - name: Setup PHP
       uses: shivammathur/setup-php@v2
       with:
         php-version: '8.3'
         extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, dom, filter, gd, iconv, json, mbstring, pdo
-
+        
     - name: Get Composer Cache Directory
       id: composer-cache
       run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
+      
     - name: Cache Composer dependencies
       uses: actions/cache@v3
       with:
         path: ${{ steps.composer-cache.outputs.dir }}
         key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
         restore-keys: ${{ runner.os }}-composer-
-
+        
     - name: Install Composer dependencies
       run: composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
-
+      
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '22'
         cache: 'npm'
-
+        
     - name: Install NPM dependencies
       run: npm ci
-
+      
     - name: Build assets
       run: npm run build
-
+      
     - name: Create deployment info
       run: |
         echo "Deployment started at: $(date)" > deployment-info.txt
         echo "Commit: ${{ github.sha }}" >> deployment-info.txt
         echo "Branch: ${{ github.ref_name }}" >> deployment-info.txt
-
-    - name: Deploy to cPanel via FTP
+        
+    - name: Prepare deployment structure
+      run: |
+        # Create deployment folders
+        mkdir -p deployment/rahantara
+        mkdir -p deployment/public_html/rahantara.id
+        
+        # Copy Laravel app files (excluding public folder)
+        rsync -av --progress ./ deployment/rahantara/ \
+          --exclude=public \
+          --exclude=.git \
+          --exclude=node_modules \
+          --exclude=tests \
+          --exclude=.github \
+          --exclude=deployment
+          
+        # Copy public folder contents to public_html/rahantara.id
+        cp -r public/* deployment/public_html/rahantara.id/
+        
+        # Create modified index.php for symlink structure
+        cat > deployment/public_html/rahantara.id/index.php << 'EOF'
+        <?php
+        
+        use Illuminate\Contracts\Http\Kernel;
+        use Illuminate\Http\Request;
+        
+        define('LARAVEL_START', microtime(true));
+        
+        // Autoload from rahantara app directory (two levels up)
+        require __DIR__.'/../../rahantara/vendor/autoload.php';
+        
+        // Bootstrap Laravel app from rahantara directory
+        $app = require_once __DIR__.'/../../rahantara/bootstrap/app.php';
+        
+        $kernel = $app->make(Kernel::class);
+        
+        $response = $kernel->handle(
+            $request = Request::capture()
+        )->send();
+        
+        $kernel->terminate($request, $response);
+        EOF
+        
+        # Create .htaccess for Laravel
+        cat > deployment/public_html/rahantara.id/.htaccess << 'EOF'
+        <IfModule mod_rewrite.c>
+            <IfModule mod_negotiation.c>
+                Options -MultiViews -Indexes
+            </IfModule>
+        
+            RewriteEngine On
+        
+            # Handle Authorization Header
+            RewriteCond %{HTTP:Authorization} .
+            RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+        
+            # Redirect Trailing Slashes If Not A Folder...
+            RewriteCond %{REQUEST_FILENAME} !-d
+            RewriteCond %{REQUEST_URI} (.+)/$
+            RewriteRule ^ %1 [L,R=301]
+        
+            # Send Requests To Front Controller...
+            RewriteCond %{REQUEST_FILENAME} !-d
+            RewriteCond %{REQUEST_FILENAME} !-f
+            RewriteRule ^ index.php [L]
+        </IfModule>
+        EOF
+        
+    - name: Deploy Laravel App to /rahantara directory
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
         server: ${{ secrets.PUBLIC_FTP_SERVER }}
         username: ${{ secrets.PUBLIC_FTP_USERNAME }}
         password: ${{ secrets.PUBLIC_FTP_PASSWORD }}
         port: ${{ secrets.PUBLIC_FTP_PORT }}
-        local-dir: ./
-        server-dir: /public_html/
+        local-dir: ./deployment/rahantara/
+        server-dir: /rahantara/
         exclude: |
           **/.git*
           **/.git*/**
           **/node_modules/**
           **/tests/**
           **/.github/**
-          **/.env.example
-          **/README.md
-          **/package-lock.json
-          **/composer.lock
-          **/.editorconfig
-          **/.gitignore
-          **/.styleci.yml
-          **/phpunit.xml
-          **/vite.config.js
-          **/tailwind.config.js
-          **/.env
-
+          **/deployment/**
+          
+    - name: Deploy Public Assets to /public_html/rahantara.id/
+      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+      with:
+        server: ${{ secrets.PUBLIC_FTP_SERVER }}
+        username: ${{ secrets.PUBLIC_FTP_USERNAME }}
+        password: ${{ secrets.PUBLIC_FTP_PASSWORD }}
+        port: ${{ secrets.PUBLIC_FTP_PORT }}
+        local-dir: ./deployment/public_html/rahantara.id/
+        server-dir: /public_html/rahantara.id/
+        
+    - name: Create SSH commands for symlinks (Manual execution required)
+      run: |
+        echo "=== SSH COMMANDS TO RUN MANUALLY ==="
+        echo "After deployment, run these commands via SSH or cPanel Terminal:"
+        echo ""
+        echo "cd /home/rahe9358/public_html/rahantara.id"
+        echo "ln -sf ../../rahantara/storage/app/public storage"
+        echo "cd /home/rahe9358/rahantara"
+        echo "php artisan storage:link --force"
+        echo "php artisan config:cache"
+        echo "php artisan route:cache"
+        echo "php artisan view:cache"
+        echo "chmod -R 775 storage/"
+        echo "chmod -R 775 bootstrap/cache/"
+        echo ""
+        echo "=== VERIFY STRUCTURE ==="
+        echo "Your final structure should be:"
+        echo "/home/rahe9358/rahantara/ (Laravel app)"
+        echo "/home/rahe9358/public_html/rahantara.id/ (Public files + symlinks)"
+        
     - name: ✅ Deployment completed
       run: |
-        echo "Prosed deploy done!"
+        echo "Rahantara deployment completed!"
         echo "Deployed at: $(date)"
+        echo ""
+        echo "Manual steps required:"
+        echo "1. SSH into your server"
+        echo "2. Run the symlink commands shown above"
+        echo "3. Set up your .env file at /home/rahe9358/rahantara/.env"
+        echo "4. Run database migrations if needed"
