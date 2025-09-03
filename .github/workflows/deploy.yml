@@ -1,4 +1,4 @@
-name: Deploy Laravel Rahantara to cPanel via FTP with Symlink
+name: Auto-Deploy Laravel Rahantara to cPanel with Symlinks
 on:
   push:
     branches: [ main, master ]
@@ -52,11 +52,9 @@ jobs:
         
     - name: Prepare deployment structure
       run: |
-        # Create deployment folders
         mkdir -p deployment/rahantara
         mkdir -p deployment/public_html/rahantara.id
         
-        # Copy Laravel app files (excluding public folder)
         rsync -av --progress ./ deployment/rahantara/ \
           --exclude=public \
           --exclude=.git \
@@ -65,10 +63,8 @@ jobs:
           --exclude=.github \
           --exclude=deployment
           
-        # Copy public folder contents to public_html/rahantara.id
         cp -r public/* deployment/public_html/rahantara.id/
         
-        # Create modified index.php for symlink structure
         cat > deployment/public_html/rahantara.id/index.php << 'EOF'
         <?php
         
@@ -77,10 +73,8 @@ jobs:
         
         define('LARAVEL_START', microtime(true));
         
-        // Autoload from rahantara app directory (two levels up)
         require __DIR__.'/../../rahantara/vendor/autoload.php';
         
-        // Bootstrap Laravel app from rahantara directory
         $app = require_once __DIR__.'/../../rahantara/bootstrap/app.php';
         
         $kernel = $app->make(Kernel::class);
@@ -92,7 +86,6 @@ jobs:
         $kernel->terminate($request, $response);
         EOF
         
-        # Create .htaccess for Laravel
         cat > deployment/public_html/rahantara.id/.htaccess << 'EOF'
         <IfModule mod_rewrite.c>
             <IfModule mod_negotiation.c>
@@ -101,23 +94,20 @@ jobs:
         
             RewriteEngine On
         
-            # Handle Authorization Header
             RewriteCond %{HTTP:Authorization} .
             RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
         
-            # Redirect Trailing Slashes If Not A Folder...
             RewriteCond %{REQUEST_FILENAME} !-d
             RewriteCond %{REQUEST_URI} (.+)/$
             RewriteRule ^ %1 [L,R=301]
         
-            # Send Requests To Front Controller...
             RewriteCond %{REQUEST_FILENAME} !-d
             RewriteCond %{REQUEST_FILENAME} !-f
             RewriteRule ^ index.php [L]
         </IfModule>
         EOF
         
-    - name: Deploy Laravel App to /rahantara directory
+    - name: Deploy Laravel App to /rahantara
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
         server: ${{ secrets.PUBLIC_FTP_SERVER }}
@@ -134,7 +124,7 @@ jobs:
           **/.github/**
           **/deployment/**
           
-    - name: Deploy Public Assets to /public_html/rahantara.id/
+    - name: Deploy Public Assets
       uses: SamKirkland/FTP-Deploy-Action@v4.3.4
       with:
         server: ${{ secrets.PUBLIC_FTP_SERVER }}
@@ -144,33 +134,71 @@ jobs:
         local-dir: ./deployment/public_html/rahantara.id/
         server-dir: /public_html/rahantara.id/
         
-    - name: Create SSH commands for symlinks (Manual execution required)
+    - name: Create symlink script
       run: |
-        echo "=== SSH COMMANDS TO RUN MANUALLY ==="
-        echo "After deployment, run these commands via SSH or cPanel Terminal:"
-        echo ""
-        echo "cd /home/rahe9358/public_html/rahantara.id"
-        echo "ln -sf ../../rahantara/storage/app/public storage"
-        echo "cd /home/rahe9358/rahantara"
-        echo "php artisan storage:link --force"
-        echo "php artisan config:cache"
-        echo "php artisan route:cache"
-        echo "php artisan view:cache"
-        echo "chmod -R 775 storage/"
-        echo "chmod -R 775 bootstrap/cache/"
-        echo ""
-        echo "=== VERIFY STRUCTURE ==="
-        echo "Your final structure should be:"
-        echo "/home/rahe9358/rahantara/ (Laravel app)"
-        echo "/home/rahe9358/public_html/rahantara.id/ (Public files + symlinks)"
+        cat > symlink-setup.sh << 'EOF'
+        #!/bin/bash
+        cd /home/rahe9358/public_html/rahantara.id
+        if [ -L "storage" ]; then
+            rm storage
+        fi
+        if [ -d "storage" ]; then
+            rm -rf storage
+        fi
+        ln -sf ../../rahantara/storage/app/public storage
         
-    - name: ✅ Deployment completed
+        cd /home/rahe9358/rahantara
+        if [ ! -L "public/storage" ]; then
+            if [ -d "public/storage" ]; then
+                rm -rf public/storage
+            fi
+            ln -sf ../storage/app/public public/storage
+        fi
+        
+        chmod -R 775 storage/
+        chmod -R 775 bootstrap/cache/
+        
+        if [ -f ".env" ]; then
+            php artisan config:clear
+            php artisan cache:clear
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+        fi
+        
+        echo "Symlinks created successfully"
+        echo "Structure:"
+        echo "/home/rahe9358/rahantara/ - Laravel app"
+        echo "/home/rahe9358/public_html/ - Public files"
+        echo "/home/rahe9358/public_html/storage -> ../rahantara/storage/app/public"
+        EOF
+        
+    - name: Deploy symlink script
+      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+      with:
+        server: ${{ secrets.PUBLIC_FTP_SERVER }}
+        username: ${{ secrets.PUBLIC_FTP_USERNAME }}
+        password: ${{ secrets.PUBLIC_FTP_PASSWORD }}
+        port: ${{ secrets.PUBLIC_FTP_PORT }}
+        local-dir: ./
+        server-dir: /
+        include: |
+          symlink-setup.sh
+          
+    - name: Execute symlink setup via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USERNAME }}
+        password: ${{ secrets.SSH_PASSWORD }}
+        port: ${{ secrets.SSH_PORT || 22 }}
+        script: |
+          chmod +x /home/rahe9358/symlink-setup.sh
+          bash /home/rahe9358/symlink-setup.sh
+          rm /home/rahe9358/symlink-setup.sh
+          
+    - name: Deployment completed
       run: |
-        echo "Rahantara deployment completed!"
+        echo "Rahantara auto-deployment completed!"
         echo "Deployed at: $(date)"
-        echo ""
-        echo "Manual steps required:"
-        echo "1. SSH into your server"
-        echo "2. Run the symlink commands shown above"
-        echo "3. Set up your .env file at /home/rahe9358/rahantara/.env"
-        echo "4. Run database migrations if needed"
+        echo "All symlinks have been created automatically"
